@@ -4,9 +4,7 @@ Keeps NVIDIA Instant Replay always on for the new **NVIDIA App** (replaces the o
 
 Injects a hook DLL into `nvcontainer.exe` to patch the checks that disable Instant Replay.
 
-> **Purpose:** This tool exists for one reason — never missing a good clip because Instant Replay quietly turned itself off. That's it.
-
-> ⚠️ **We do not condone piracy, DRM bypass, or recording of any protected media. This project has nothing to do with any of that and we strongly oppose any use of it for those purposes. Use it responsibly and only for capturing your own gameplay.**
+> This tool exists for one reason — never missing a good clip. We do not condone piracy, DRM bypass, or recording of any protected media; use it responsibly and only for capturing your own gameplay.
 
 ## How it works
 

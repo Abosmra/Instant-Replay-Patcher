@@ -1,0 +1,38 @@
+Copyright (c) 2025 Abosmra
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to use,
+copy, modify, merge, and distribute the Software for personal, non-commercial
+purposes, subject to the following conditions:
+
+1. PERMITTED USE
+   The Software may only be used to restore or improve the functionality of
+   NVIDIA Instant Replay on your own system for personal, non-commercial use.
+
+2. PROHIBITED USE
+   You may not use, adapt, or incorporate the Software or any part of it to:
+   a. Gain an unfair advantage in any online or offline game (cheating);
+   b. Bypass, circumvent, or remove digital rights management (DRM),
+      anti-cheat, anti-tamper, or copy-protection mechanisms;
+   c. Inject code into any process without the explicit authorisation of the
+      owner of that system;
+   d. Facilitate piracy or the unauthorised distribution of copyrighted works;
+   e. Cause harm to any system, user, or third party.
+
+3. REDISTRIBUTION
+   Redistribution of the Software, modified or unmodified, is permitted
+   provided that this license and copyright notice are included in full, and
+   that the redistributed Software is not bundled with or used to enable any
+   prohibited use listed above.
+
+4. NO WARRANTY
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+   FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+   DEALINGS IN THE SOFTWARE.
+
+5. ACCEPTANCE
+   Use of the Software constitutes acceptance of these terms.

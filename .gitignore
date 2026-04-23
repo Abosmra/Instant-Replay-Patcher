@@ -1,0 +1,21 @@
+# Build artifacts
+bin/
+*.exe
+*.dll
+*.obj
+*.res
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# Detours dependency (add as submodule or download separately)
+Detours/
+
+# Other projects / temp files
+AlwaysShadow-master/
+check_shadowplay_api.py
+
+# IDE / tooling
+.vscode/
+.claude/

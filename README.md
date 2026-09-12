@@ -34,22 +34,16 @@ Run `IRPatcher.exe` as **Administrator**.
 ## Building
 
 **Requirements:**
-- Visual Studio with MSVC (x64)
-- [Microsoft Detours](https://github.com/microsoft/detours) — clone into a `Detours/` folder next to the source files and build it
+- Visual Studio (with C++ x64 tools)
+- CMake 3.20+
+- [Microsoft Detours](https://github.com/microsoft/detours) (cloned in `Detours/`)
 
-```
-git clone https://github.com/microsoft/detours Detours
-cd Detours && nmake
-cd ..
-```
-
-Then open a **Visual Studio x64 Developer Command Prompt** (as Administrator) and run:
-
-```
-build.bat
+```cmd
+cmake -B build -A x64
+cmake --build build --config Release
 ```
 
-This produces `IRPatcher.exe`.
+This produces standalone, statically linked binaries in `bin/` (`IRPatcher.exe` with embedded `hook.dll`).
 
 ## Credits
 

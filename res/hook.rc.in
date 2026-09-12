@@ -1,0 +1,9 @@
+#define IDR_HOOK_DLL  101
+#define IDI_APP_ICON  200
+
+IDI_APP_ICON  ICON    "@ICON_PATH@"
+IDR_HOOK_DLL  RCDATA  "@HOOK_DLL_PATH@"
+
+// Embed manifest so Windows UAC prompts for admin on launch
+1 RT_MANIFEST "@MANIFEST_PATH@"
+

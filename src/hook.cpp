@@ -110,18 +110,30 @@ static void UnpatchNvd3dumx(HMODULE hMod)
   ApplyPatterns(hMod, pairs, 2);
 }
 
+static HANDLE g_hStopEvent = nullptr;
+static HANDLE g_hWatcherThread = nullptr;
+
 /* -----------------------------------------------------------------------
  * API hooks
  * --------------------------------------------------------------------- */
 static decltype(&GetWindowDisplayAffinity) Real_GetWindowDisplayAffinity = GetWindowDisplayAffinity;
 static BOOL WINAPI Hook_GetWindowDisplayAffinity(HWND, DWORD *p)
 {
+  if (!p)
+  {
+    SetLastError(ERROR_INVALID_PARAMETER);
+    return FALSE;
+  }
   *p = WDA_NONE;
   return TRUE;
 }
 
 static decltype(&Module32FirstW) Real_Module32FirstW = Module32FirstW;
-static BOOL WINAPI Hook_Module32FirstW(HANDLE, LPMODULEENTRY32W) { return FALSE; }
+static BOOL WINAPI Hook_Module32FirstW(HANDLE, LPMODULEENTRY32W)
+{
+  SetLastError(ERROR_NO_MORE_FILES);
+  return FALSE;
+}
 
 static decltype(&LoadLibraryExW) Real_LoadLibraryExW = LoadLibraryExW;
 static HMODULE WINAPI Hook_LoadLibraryExW(LPCWSTR name, HANDLE f, DWORD flags)
@@ -138,6 +150,27 @@ static HMODULE WINAPI Hook_LoadLibraryExW(LPCWSTR name, HANDLE f, DWORD flags)
     }
   }
   return h;
+}
+
+static DWORD WINAPI WatcherThreadProc(LPVOID)
+{
+  for (int i = 0; i < kWatcherTicks; ++i)
+  {
+    if (WaitForSingleObject(g_hStopEvent, kWatcherSleepMs) != WAIT_TIMEOUT)
+    {
+      Log("Watcher thread signaled to stop\n");
+      return 0;
+    }
+    HMODULE h = GetModuleHandleW(L"nvd3dumx.dll");
+    if (h)
+    {
+      Log("nvd3dumx.dll appeared after %ds — patching\n", i + 1);
+      PatchNvd3dumx(h);
+      return 0;
+    }
+  }
+  Log("nvd3dumx.dll never appeared\n");
+  return 0;
 }
 
 static void InstallHooks()
@@ -193,10 +226,24 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID)
                 }
                 Log("nvd3dumx.dll never appeared\n");
                 return 0; }, nullptr, 0, nullptr);
+      g_hStopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      g_hWatcherThread = CreateThread(nullptr, 0, WatcherThreadProc, nullptr, 0, nullptr);
     }
   }
   else if (reason == DLL_PROCESS_DETACH)
   {
+    if (g_hStopEvent)
+    {
+      SetEvent(g_hStopEvent);
+      if (g_hWatcherThread)
+      {
+        WaitForSingleObject(g_hWatcherThread, 2000);
+        CloseHandle(g_hWatcherThread);
+        g_hWatcherThread = nullptr;
+      }
+      CloseHandle(g_hStopEvent);
+      g_hStopEvent = nullptr;
+    }
     RemoveHooks();
     HMODULE hNvd = GetModuleHandleW(L"nvd3dumx.dll");
     if (hNvd)

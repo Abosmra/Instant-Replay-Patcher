@@ -1,14 +1,11 @@
 /*
- * main.cpp \u2014 Instant Replay Patcher
+ * main.cpp — Instant Replay Patcher
  *
- * Runs as a normal user (no forced UAC).
- * Self-elevates via ShellExecuteW runas ONLY for Install/Uninstall.
+ * Runs with Administrator privileges (required for process injection).
  *
  * Arguments:
- *   (none)        show dialog
- *   --silent      inject silently at startup (added by Run key)
- *   --install     install Run key (called elevated)
- *   --uninstall   remove Run key (called elevated)
+ *   (none)        show interactive control dialog
+ *   --silent      inject silently on login (registered via Scheduled Task)
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -93,7 +90,7 @@ static int RunCommand(const wchar_t *cmd)
 
 static bool IsInstalled()
 {
-  return RunCommand(L"schtasks /Query /TN \"InstantReplayPatcher\"") == 0 || RunCommand(L"sc query InstantReplayPatcher") == 0;
+  return GetFileAttributesW(L"C:\\Windows\\System32\\Tasks\\InstantReplayPatcher") != INVALID_FILE_ATTRIBUTES;
 }
 
 static bool DoInstallRunKey()
@@ -114,10 +111,7 @@ static bool DoInstallRunKey()
 
 static bool DoUninstallRunKey()
 {
-  RunCommand(L"sc stop InstantReplayPatcher");
-  RunCommand(L"sc delete InstantReplayPatcher");
-
-  bool deleted = RunCommand(L"schtasks /Delete /F /TN InstantReplayPatcher") == 0 || RunCommand(L"schtasks /Delete /F /TN \"InstantReplayPatcher\"") == 0;
+  bool deleted = RunCommand(L"schtasks /Delete /F /TN \"InstantReplayPatcher\"") == 0;
 
   HKEY hk;
   if (RegOpenKeyExW(HKEY_CURRENT_USER,
@@ -128,12 +122,30 @@ static bool DoUninstallRunKey()
     RegCloseKey(hk);
   }
 
-  return deleted || RunCommand(L"sc query InstantReplayPatcher") != 0;
+  return deleted;
 }
 
 /* -----------------------------------------------------------------------
- * Extract hook.dll from resource to %TEMP%\ir_hook.dll
+ * Extract hook.dll from resource to %TEMP%\ir_hook_<PID>.dll
  * --------------------------------------------------------------------- */
+static void CleanOldTempDlls(const wchar_t *tmp)
+{
+  wchar_t pattern[MAX_PATH];
+  swprintf_s(pattern, L"%sir_hook_*.dll", tmp);
+  WIN32_FIND_DATAW fd = {};
+  HANDLE hFind = FindFirstFileW(pattern, &fd);
+  if (hFind != INVALID_HANDLE_VALUE)
+  {
+    do
+    {
+      wchar_t filePath[MAX_PATH];
+      swprintf_s(filePath, L"%s%s", tmp, fd.cFileName);
+      DeleteFileW(filePath);
+    } while (FindNextFileW(hFind, &fd));
+    FindClose(hFind);
+  }
+}
+
 static std::wstring ExtractDll()
 {
   HRSRC hRes = FindResourceW(nullptr, MAKEINTRESOURCEW(IDR_HOOK_DLL), reinterpret_cast<LPCWSTR>(RT_RCDATA));
@@ -149,6 +161,7 @@ static std::wstring ExtractDll()
 
   wchar_t tmp[MAX_PATH], path[MAX_PATH];
   GetTempPathW(MAX_PATH, tmp);
+  CleanOldTempDlls(tmp);
   swprintf_s(path, L"%sir_hook_%lu.dll", tmp, GetCurrentProcessId());
   DeleteFileW(path);
 
@@ -219,21 +232,41 @@ static std::wstring GetProcCmdLine(DWORD pid)
   return result;
 }
 
-static DWORD FindNvContainer()
+static bool AnyNvContainerRunning()
 {
   HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
   if (snap == INVALID_HANDLE_VALUE)
-    return 0;
+    return false;
   PROCESSENTRY32W pe = {sizeof(pe)};
-  DWORD pid = 0, fallback = 0;
+  bool found = false;
   if (Process32FirstW(snap, &pe))
   {
     do
     {
       if (_wcsicmp(pe.szExeFile, L"nvcontainer.exe") == 0)
       {
-        if (!fallback)
-          fallback = pe.th32ProcessID;
+        found = true;
+        break;
+      }
+    } while (Process32NextW(snap, &pe));
+  }
+  CloseHandle(snap);
+  return found;
+}
+
+static DWORD FindNvContainer()
+{
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap == INVALID_HANDLE_VALUE)
+    return 0;
+  PROCESSENTRY32W pe = {sizeof(pe)};
+  DWORD pid = 0;
+  if (Process32FirstW(snap, &pe))
+  {
+    do
+    {
+      if (_wcsicmp(pe.szExeFile, L"nvcontainer.exe") == 0)
+      {
         if (GetProcCmdLine(pe.th32ProcessID).find(L"SPUser") != std::wstring::npos)
         {
           pid = pe.th32ProcessID;
@@ -243,7 +276,7 @@ static DWORD FindNvContainer()
     } while (Process32NextW(snap, &pe));
   }
   CloseHandle(snap);
-  return pid ? pid : fallback;
+  return pid;
 }
 
 static DWORD WaitForNvContainer()
@@ -332,6 +365,7 @@ static bool DoEject(DWORD pid)
     return false;
   MODULEENTRY32W me = {sizeof(me)};
   HMODULE hMod = nullptr;
+  wchar_t loadedDllPath[MAX_PATH] = {};
   if (Module32FirstW(snap, &me))
   {
     do
@@ -339,6 +373,7 @@ static bool DoEject(DWORD pid)
       if (_wcsnicmp(me.szModule, L"ir_hook", 7) == 0)
       {
         hMod = me.hModule;
+        wcsncpy_s(loadedDllPath, me.szExePath, _TRUNCATE);
         break;
       }
     } while (Module32NextW(snap, &me));
@@ -364,10 +399,11 @@ static bool DoEject(DWORD pid)
   GetExitCodeThread(ht, &code);
   CloseHandle(ht);
   CloseHandle(hp);
-  wchar_t tmp[MAX_PATH], path[MAX_PATH];
-  GetTempPathW(MAX_PATH, tmp);
-  swprintf_s(path, L"%sir_hook.dll", tmp);
-  DeleteFileW(path);
+  if (loadedDllPath[0])
+  {
+    Sleep(100);
+    DeleteFileW(loadedDllPath);
+  }
   return code != 0;
 }
 
@@ -434,8 +470,20 @@ static void ActionApplyNow()
   DWORD pid = FindNvContainer();
   if (!pid)
   {
-    MessageBoxW(g_hwnd, L"NVIDIA App is not running. Start it and try again.",
-                L"Not Running", MB_OK | MB_ICONWARNING);
+    if (AnyNvContainerRunning())
+    {
+      MessageBoxW(g_hwnd,
+                  L"NVIDIA App is running, but Instant Replay is currently turned off.\n\n"
+                  L"Please turn ON Instant Replay in NVIDIA App first, then click Apply Now.",
+                  L"Instant Replay Inactive", MB_OK | MB_ICONWARNING);
+    }
+    else
+    {
+      MessageBoxW(g_hwnd,
+                  L"NVIDIA App is not running.\n\n"
+                  L"Please start NVIDIA App and turn ON Instant Replay first.",
+                  L"NVIDIA App Not Found", MB_OK | MB_ICONWARNING);
+    }
     return;
   }
   if (IsPatchInMemory())
@@ -447,26 +495,39 @@ static void ActionApplyNow()
   std::wstring dll = ExtractDll();
   if (dll.empty())
   {
-    MessageBoxW(g_hwnd, L"Could not extract the hook. Check write access to the temp folder.",
+    MessageBoxW(g_hwnd, L"Could not extract the hook DLL. Check write access to %TEMP%.",
                 L"Extraction Failed", MB_OK | MB_ICONERROR);
     return;
   }
   if (DoInject(pid, dll.c_str()))
-    MessageBoxW(g_hwnd, L"Patch applied successfully. It will reset on the next reboot.",
+    MessageBoxW(g_hwnd, L"Patch applied successfully. It will remain active until reboot or NVIDIA App restart.",
                 L"Patch Applied", MB_OK | MB_ICONINFORMATION);
   else
-    MessageBoxW(g_hwnd, L"Injection failed.", L"Injection Failed", MB_OK | MB_ICONERROR);
+    MessageBoxW(g_hwnd, L"Injection failed. Ensure Instant Replay is active and try again.",
+                L"Injection Failed", MB_OK | MB_ICONERROR);
 }
 
 static void ActionRemove()
 {
   DWORD pid = FindNvContainer();
-  if (pid && DoEject(pid))
+  if (!pid)
+  {
+    MessageBoxW(g_hwnd, L"NVIDIA App (Instant Replay) is not running.",
+                L"Not Running", MB_OK | MB_ICONWARNING);
+    return;
+  }
+  if (!IsPatchInMemory())
+  {
+    MessageBoxW(g_hwnd, L"No active patch found in memory.",
+                L"Nothing to Remove", MB_OK | MB_ICONINFORMATION);
+    return;
+  }
+  if (DoEject(pid))
     MessageBoxW(g_hwnd, L"Patch removed from memory. Startup entry is unchanged.",
                 L"Patch Removed", MB_OK | MB_ICONINFORMATION);
   else
-    MessageBoxW(g_hwnd, L"No active patch found in memory. It may not have been applied.",
-                L"Nothing to Remove", MB_OK | MB_ICONWARNING);
+    MessageBoxW(g_hwnd, L"Failed to remove the patch from memory.",
+                L"Eject Failed", MB_OK | MB_ICONERROR);
 }
 
 static void ActionInstall()
@@ -800,6 +861,9 @@ static void ShowDialog()
  * --------------------------------------------------------------------- */
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR lpCmd, int)
 {
+  if (lpCmd && wcsstr(lpCmd, L"--silent"))
+    return RunSilent();
+
   HANDLE hMutex = CreateMutexW(nullptr, TRUE, L"IRPatcher_Instance");
   if (GetLastError() == ERROR_ALREADY_EXISTS)
   {
@@ -811,9 +875,6 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR lpCmd, int)
     CloseHandle(hMutex);
     return 0;
   }
-
-  if (lpCmd && wcsstr(lpCmd, L"--silent"))
-    return RunSilent();
 
   if (!IsRunningAsAdmin())
   {

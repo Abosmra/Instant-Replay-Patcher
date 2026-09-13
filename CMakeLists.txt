@@ -84,6 +84,7 @@ configure_file(
 
 add_executable(IRPatcher WIN32
     src/main.cpp
+    src/gui.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/hook.rc"
 )
 

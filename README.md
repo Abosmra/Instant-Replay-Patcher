@@ -26,10 +26,10 @@ Run `IRPatcher.exe` as **Administrator**.
 
 | Button | Effect |
 |--------|--------|
-| **Apply Patch** | Injects the patch for this session only — resets on reboot (shows *✓ Patch Active* when active) |
-| **Eject from Memory** | Ejects the patch from memory |
-| **Enable Auto-Start** | Registers a scheduled task to silently auto-apply the patch on every login (shows *✓ Auto-Start Active*) |
-| **Remove Task** | Removes the patch from memory and deletes the scheduled startup task |
+| **Enable Fix** | Injects the patch for this session only — resets on reboot (shows *✓ Active* when active) |
+| **Disable Fix** | Turns off the fix and ejects the hook from memory |
+| **Enable Auto-Start** | Registers a scheduled task to silently auto-apply the patch on every login (shows *✓ Enabled*) |
+| **Disable** | Disables auto-start and removes the scheduled startup task |
 
 ## Building
 

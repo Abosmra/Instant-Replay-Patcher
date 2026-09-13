@@ -3,6 +3,7 @@ project(InstantReplayPatcher LANGUAGES C CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+add_compile_options("$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
 
 # Verify 64-bit architecture
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -86,13 +87,13 @@ add_executable(IRPatcher WIN32
     "${CMAKE_CURRENT_BINARY_DIR}/hook.rc"
 )
 
-# Ensure hook.dll is built before compiling the resource script into IRPatcher
 add_dependencies(IRPatcher hook)
 
 target_link_libraries(IRPatcher PRIVATE
     advapi32
     user32
     gdi32
+    gdiplus
     shell32
     dwmapi
 )

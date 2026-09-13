@@ -16,8 +16,6 @@
 #include <detours.h>
 #include <stdio.h>
 
-static constexpr int kWatcherTicks = 300;
-static constexpr DWORD kWatcherSleepMs = 1'000;
 
 static void Log(const char *fmt, ...)
 {
@@ -35,8 +33,6 @@ static void Log(const char *fmt, ...)
   va_end(va);
   fclose(f);
 }
-
-#pragma comment(lib, "psapi.lib")
 
 /* -----------------------------------------------------------------------
  * nvd3dumx.dll byte patches (Widevine L1 flag bypass)
@@ -110,9 +106,6 @@ static void UnpatchNvd3dumx(HMODULE hMod)
   ApplyPatterns(hMod, pairs, 2);
 }
 
-static HANDLE g_hStopEvent = nullptr;
-static HANDLE g_hWatcherThread = nullptr;
-
 /* -----------------------------------------------------------------------
  * API hooks
  * --------------------------------------------------------------------- */
@@ -152,27 +145,6 @@ static HMODULE WINAPI Hook_LoadLibraryExW(LPCWSTR name, HANDLE f, DWORD flags)
   return h;
 }
 
-static DWORD WINAPI WatcherThreadProc(LPVOID)
-{
-  for (int i = 0; i < kWatcherTicks; ++i)
-  {
-    if (WaitForSingleObject(g_hStopEvent, kWatcherSleepMs) != WAIT_TIMEOUT)
-    {
-      Log("Watcher thread signaled to stop\n");
-      return 0;
-    }
-    HMODULE h = GetModuleHandleW(L"nvd3dumx.dll");
-    if (h)
-    {
-      Log("nvd3dumx.dll appeared after %ds — patching\n", i + 1);
-      PatchNvd3dumx(h);
-      return 0;
-    }
-  }
-  Log("nvd3dumx.dll never appeared\n");
-  return 0;
-}
-
 static void InstallHooks()
 {
   DetourTransactionBegin();
@@ -210,40 +182,9 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID)
       Log("nvd3dumx.dll already loaded — patching now\n");
       PatchNvd3dumx(hNvd);
     }
-    else
-    {
-      Log("nvd3dumx.dll not yet loaded — starting watcher thread\n");
-      CreateThread(nullptr, 0, [](LPVOID) -> DWORD
-                   {
-                for (int i = 0; i < kWatcherTicks; ++i) {
-                    Sleep(kWatcherSleepMs);
-                    HMODULE h = GetModuleHandleW(L"nvd3dumx.dll");
-                    if (h) {
-                        Log("nvd3dumx.dll appeared after %ds — patching\n", i + 1);
-                        PatchNvd3dumx(h);
-                        return 0;
-                    }
-                }
-                Log("nvd3dumx.dll never appeared\n");
-                return 0; }, nullptr, 0, nullptr);
-      g_hStopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-      g_hWatcherThread = CreateThread(nullptr, 0, WatcherThreadProc, nullptr, 0, nullptr);
-    }
   }
   else if (reason == DLL_PROCESS_DETACH)
   {
-    if (g_hStopEvent)
-    {
-      SetEvent(g_hStopEvent);
-      if (g_hWatcherThread)
-      {
-        WaitForSingleObject(g_hWatcherThread, 2000);
-        CloseHandle(g_hWatcherThread);
-        g_hWatcherThread = nullptr;
-      }
-      CloseHandle(g_hStopEvent);
-      g_hStopEvent = nullptr;
-    }
     RemoveHooks();
     HMODULE hNvd = GetModuleHandleW(L"nvd3dumx.dll");
     if (hNvd)

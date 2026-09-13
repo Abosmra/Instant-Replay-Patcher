@@ -26,10 +26,10 @@ Run `IRPatcher.exe` as **Administrator**.
 
 | Button | Effect |
 |--------|--------|
-| Apply Now | Injects the patch for this session only — resets on reboot |
-| Remove | Ejects the patch from memory |
-| Install | Injects now and registers a scheduled task to auto-apply on every login |
-| Uninstall | Removes the patch from memory and deletes the startup task |
+| **Apply Patch** | Injects the patch for this session only — resets on reboot (shows *✓ Patch Active* when active) |
+| **Eject from Memory** | Ejects the patch from memory |
+| **Enable Auto-Start** | Registers a scheduled task to silently auto-apply the patch on every login (shows *✓ Auto-Start Active*) |
+| **Remove Task** | Removes the patch from memory and deletes the scheduled startup task |
 
 ## Building
 
@@ -48,7 +48,6 @@ This produces standalone, statically linked binaries in `bin/` (`IRPatcher.exe` 
 ## Credits
 
 - [furyzenblade/ShadowPlay_Patcher](https://github.com/furyzenblade/ShadowPlay_Patcher) — for the binaries
-- [womblee/instant_replay_patcher](https://github.com/womblee/instant_replay_patcher) — for the binaries
 
 ## Notes
 

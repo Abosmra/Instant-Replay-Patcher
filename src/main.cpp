@@ -8,13 +8,16 @@
  *   --silent      inject silently on login (registered via Scheduled Task)
  */
 
+#define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
 #include <tlhelp32.h>
 #include <string>
+#include <vector>
 #include <dwmapi.h>
-#pragma comment(lib, "dwmapi.lib")
+#include <objbase.h>
+#include <gdiplus.h>
 
 #define IDR_HOOK_DLL 101
 #define IDI_APP_ICON 200
@@ -25,28 +28,8 @@ static constexpr DWORD kPollIntervalMs = 2'000;
 static constexpr DWORD kStartupDelayMs = 3'000;
 static constexpr int kPollAttempts = 150;
 
-static constexpr int kDlgW = 420;
-static constexpr int kDlgH = 324;
-static constexpr int kBtnW = 380;
-static constexpr int kBtnH = 46;
-static constexpr int kBtnX = 20;
-static constexpr int kBtnY0 = 78;
-static constexpr int kBtnGap = 8;
-
-static constexpr COLORREF kClrBg = RGB(18, 18, 25);
-static constexpr COLORREF kClrBtnNorm = RGB(30, 30, 44);
-static constexpr COLORREF kClrBtnHov = RGB(46, 46, 66);
-static constexpr COLORREF kClrBtnPrs = RGB(58, 58, 82);
-static constexpr COLORREF kClrBorder = RGB(52, 52, 72);
-static constexpr COLORREF kClrAccent = RGB(100, 149, 255);
-static constexpr COLORREF kClrText = RGB(222, 222, 234);
-static constexpr COLORREF kClrDim = RGB(100, 100, 120);
-static constexpr COLORREF kClrGreen = RGB(72, 199, 116);
-
-#define ID_BTN_ONCE 101
-#define ID_BTN_INSTALL 102
-#define ID_BTN_UNINSTALL 103
-#define ID_BTN_REMOVE 104
+static constexpr int kDlgW = 460;
+static constexpr int kDlgH = 296;
 
 /* -----------------------------------------------------------------------
  * Admin check
@@ -111,41 +94,12 @@ static bool DoInstallRunKey()
 
 static bool DoUninstallRunKey()
 {
-  bool deleted = RunCommand(L"schtasks /Delete /F /TN \"InstantReplayPatcher\"") == 0;
-
-  HKEY hk;
-  if (RegOpenKeyExW(HKEY_CURRENT_USER,
-                    L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-                    0, KEY_SET_VALUE, &hk) == ERROR_SUCCESS)
-  {
-    RegDeleteValueW(hk, L"InstantReplayPatcher");
-    RegCloseKey(hk);
-  }
-
-  return deleted;
+  return RunCommand(L"schtasks /Delete /F /TN \"InstantReplayPatcher\"") == 0;
 }
 
 /* -----------------------------------------------------------------------
- * Extract hook.dll from resource to %TEMP%\ir_hook_<PID>.dll
+ * Extract hook.dll from resource to %TEMP%\ir_hook.dll
  * --------------------------------------------------------------------- */
-static void CleanOldTempDlls(const wchar_t *tmp)
-{
-  wchar_t pattern[MAX_PATH];
-  swprintf_s(pattern, L"%sir_hook_*.dll", tmp);
-  WIN32_FIND_DATAW fd = {};
-  HANDLE hFind = FindFirstFileW(pattern, &fd);
-  if (hFind != INVALID_HANDLE_VALUE)
-  {
-    do
-    {
-      wchar_t filePath[MAX_PATH];
-      swprintf_s(filePath, L"%s%s", tmp, fd.cFileName);
-      DeleteFileW(filePath);
-    } while (FindNextFileW(hFind, &fd));
-    FindClose(hFind);
-  }
-}
-
 static std::wstring ExtractDll()
 {
   HRSRC hRes = FindResourceW(nullptr, MAKEINTRESOURCEW(IDR_HOOK_DLL), reinterpret_cast<LPCWSTR>(RT_RCDATA));
@@ -161,8 +115,7 @@ static std::wstring ExtractDll()
 
   wchar_t tmp[MAX_PATH], path[MAX_PATH];
   GetTempPathW(MAX_PATH, tmp);
-  CleanOldTempDlls(tmp);
-  swprintf_s(path, L"%sir_hook_%lu.dll", tmp, GetCurrentProcessId());
+  swprintf_s(path, L"%sir_hook.dll", tmp);
   DeleteFileW(path);
 
   HANDLE hf = CreateFileW(path, GENERIC_WRITE, 0, nullptr,
@@ -438,31 +391,50 @@ static int RunSilent()
 }
 
 /* -----------------------------------------------------------------------
- * Dialog
+ * Dialog & UI State (GDI+ Modern Dashboard)
  * --------------------------------------------------------------------- */
-static HFONT g_uiFont = nullptr;
-static HFONT g_uiFontBold = nullptr;
-static HWND g_hoverBtn = nullptr;
+enum class BtnId
+{
+  None,
+  Apply,
+  Eject,
+  Install,
+  Uninstall
+};
+enum class ToastType
+{
+  None,
+  Success,
+  Warning,
+  Info,
+  Error
+};
+
+static BtnId g_hoverBtn = BtnId::None;
+static BtnId g_pressedBtn = BtnId::None;
 static HWND g_hwnd = nullptr;
-static HWND g_lblStart = nullptr;
-static HWND g_lblPatch = nullptr;
 static bool g_stInstall = false;
 static bool g_stPatch = false;
 static int g_dpi = 96;
 
-static int SC(int v) { return MulDiv(v, g_dpi, 96); }
+static std::wstring g_toastMsg = L"Ready to patch";
+static ToastType g_toastType = ToastType::None;
+static ULONGLONG g_toastTime = 0;
+
+static void SetToast(const std::wstring &msg, ToastType type)
+{
+  g_toastMsg = msg;
+  g_toastType = type;
+  g_toastTime = GetTickCount64();
+  if (g_hwnd)
+    InvalidateRect(g_hwnd, nullptr, FALSE);
+}
 
 static void RefreshStatus(HWND hwnd)
 {
   g_stInstall = IsInstalled();
   g_stPatch = IsPatchInMemory();
-  wchar_t s1[64], s2[64];
-  swprintf_s(s1, L"Startup:  %ls", g_stInstall ? L"Installed" : L"Not installed");
-  swprintf_s(s2, L"Patch:  %ls", g_stPatch ? L"Active" : L"Inactive");
-  SetWindowTextW(g_lblStart, s1);
-  SetWindowTextW(g_lblPatch, s2);
-  InvalidateRect(hwnd, nullptr, TRUE);
-  UpdateWindow(hwnd);
+  InvalidateRect(hwnd, nullptr, FALSE);
 }
 
 static void ActionApplyNow()
@@ -471,71 +443,47 @@ static void ActionApplyNow()
   if (!pid)
   {
     if (AnyNvContainerRunning())
-    {
-      MessageBoxW(g_hwnd,
-                  L"NVIDIA App is running, but Instant Replay is currently turned off.\n\n"
-                  L"Please turn ON Instant Replay in NVIDIA App first, then click Apply Now.",
-                  L"Instant Replay Inactive", MB_OK | MB_ICONWARNING);
-    }
+      SetToast(L"Turn ON Instant Replay in NVIDIA App first", ToastType::Warning);
     else
-    {
-      MessageBoxW(g_hwnd,
-                  L"NVIDIA App is not running.\n\n"
-                  L"Please start NVIDIA App and turn ON Instant Replay first.",
-                  L"NVIDIA App Not Found", MB_OK | MB_ICONWARNING);
-    }
+      SetToast(L"NVIDIA App is not running", ToastType::Warning);
     return;
   }
   if (IsPatchInMemory())
   {
-    MessageBoxW(g_hwnd, L"Patch is already active in memory.",
-                L"Already Patched", MB_OK | MB_ICONINFORMATION);
+    SetToast(L"Patch is already active in memory", ToastType::Info);
     return;
   }
   std::wstring dll = ExtractDll();
   if (dll.empty())
   {
-    MessageBoxW(g_hwnd, L"Could not extract the hook DLL. Check write access to %TEMP%.",
-                L"Extraction Failed", MB_OK | MB_ICONERROR);
+    SetToast(L"Could not extract hook DLL to %TEMP%", ToastType::Error);
     return;
   }
   if (DoInject(pid, dll.c_str()))
-    MessageBoxW(g_hwnd, L"Patch applied successfully. It will remain active until reboot or NVIDIA App restart.",
-                L"Patch Applied", MB_OK | MB_ICONINFORMATION);
+    SetToast(L"Patch applied! Active for this session", ToastType::Success);
   else
-    MessageBoxW(g_hwnd, L"Injection failed. Ensure Instant Replay is active and try again.",
-                L"Injection Failed", MB_OK | MB_ICONERROR);
+    SetToast(L"Injection failed. Ensure Instant Replay is active", ToastType::Error);
 }
 
 static void ActionRemove()
 {
   DWORD pid = FindNvContainer();
-  if (!pid)
+  if (!pid || !IsPatchInMemory())
   {
-    MessageBoxW(g_hwnd, L"NVIDIA App (Instant Replay) is not running.",
-                L"Not Running", MB_OK | MB_ICONWARNING);
-    return;
-  }
-  if (!IsPatchInMemory())
-  {
-    MessageBoxW(g_hwnd, L"No active patch found in memory.",
-                L"Nothing to Remove", MB_OK | MB_ICONINFORMATION);
+    SetToast(L"No active patch found in memory", ToastType::Info);
     return;
   }
   if (DoEject(pid))
-    MessageBoxW(g_hwnd, L"Patch removed from memory. Startup entry is unchanged.",
-                L"Patch Removed", MB_OK | MB_ICONINFORMATION);
+    SetToast(L"Patch successfully ejected from memory", ToastType::Success);
   else
-    MessageBoxW(g_hwnd, L"Failed to remove the patch from memory.",
-                L"Eject Failed", MB_OK | MB_ICONERROR);
+    SetToast(L"Failed to eject patch from memory", ToastType::Error);
 }
 
 static void ActionInstall()
 {
   if (IsInstalled())
   {
-    MessageBoxW(g_hwnd, L"Startup entry is already installed.",
-                L"Already Installed", MB_OK | MB_ICONINFORMATION);
+    SetToast(L"Startup task is already registered", ToastType::Info);
     return;
   }
   DWORD pid = FindNvContainer();
@@ -546,213 +494,499 @@ static void ActionInstall()
       DoInject(pid, dll.c_str());
   }
   if (DoInstallRunKey())
-    MessageBoxW(g_hwnd, L"Instant Replay will now be patched automatically on every login.",
-                L"Installed", MB_OK | MB_ICONINFORMATION);
+    SetToast(L"Installed! Auto-applies on every login", ToastType::Success);
   else
-    MessageBoxW(g_hwnd, L"Could not register the startup task.",
-                L"Install Failed", MB_OK | MB_ICONERROR);
+    SetToast(L"Failed to register scheduled task", ToastType::Error);
 }
 
 static void ActionUninstall()
 {
   if (!IsInstalled())
   {
-    MessageBoxW(g_hwnd, L"No startup entry found - it may have already been removed.",
-                L"Not Installed", MB_OK | MB_ICONWARNING);
+    SetToast(L"Startup task is not registered", ToastType::Info);
     return;
   }
   DWORD pid = FindNvContainer();
   if (pid)
     DoEject(pid);
   if (DoUninstallRunKey())
-    MessageBoxW(g_hwnd, L"Startup entry removed. The patch will no longer apply on login.",
-                L"Uninstalled", MB_OK | MB_ICONINFORMATION);
+    SetToast(L"Uninstalled. Startup task removed", ToastType::Success);
   else
-    MessageBoxW(g_hwnd, L"Failed to remove the startup entry.",
-                L"Uninstall Failed", MB_OK | MB_ICONERROR);
+    SetToast(L"Failed to remove scheduled task", ToastType::Error);
 }
 
-static LRESULT CALLBACK BtnSubclassProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l)
+static bool IsButtonEnabled(BtnId id)
 {
-  auto orig = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-  if (msg == WM_MOUSEMOVE && g_hoverBtn != hwnd)
+  switch (id)
   {
-    HWND prev = g_hoverBtn;
-    g_hoverBtn = hwnd;
-    TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, hwnd, 0};
-    TrackMouseEvent(&tme);
-    if (prev)
-      InvalidateRect(prev, nullptr, FALSE);
-    InvalidateRect(hwnd, nullptr, FALSE);
+  case BtnId::Apply:
+    return !g_stPatch;
+  case BtnId::Eject:
+    return g_stPatch;
+  case BtnId::Install:
+    return !g_stInstall;
+  case BtnId::Uninstall:
+    return g_stInstall;
+  default:
+    return false;
   }
-  else if (msg == WM_MOUSELEAVE && g_hoverBtn == hwnd)
+}
+
+static BtnId HitTestButton(float x, float y, float width, float s)
+{
+  float card1X = 18.0f * s;
+  float card1Y = 18.0f * s;
+  float card2X = 18.0f * s;
+  float card2Y = 128.0f * s;
+  float cardW = width - 36.0f * s;
+  float btnW = (cardW - 44.0f * s) / 2.0f;
+  float btnH = 34.0f * s;
+
+  Gdiplus::RectF btnApply(card1X + 16.0f * s, card1Y + 54.0f * s, btnW, btnH);
+  Gdiplus::RectF btnEject(card1X + 28.0f * s + btnW, card1Y + 54.0f * s, btnW, btnH);
+  Gdiplus::RectF btnInstall(card2X + 16.0f * s, card2Y + 54.0f * s, btnW, btnH);
+  Gdiplus::RectF btnUninstall(card2X + 28.0f * s + btnW, card2Y + 54.0f * s, btnW, btnH);
+
+  if (btnApply.Contains(x, y))
+    return BtnId::Apply;
+  if (btnEject.Contains(x, y))
+    return BtnId::Eject;
+  if (btnInstall.Contains(x, y))
+    return BtnId::Install;
+  if (btnUninstall.Contains(x, y))
+    return BtnId::Uninstall;
+
+  return BtnId::None;
+}
+
+static void AddRoundedRect(Gdiplus::GraphicsPath &path, const Gdiplus::RectF &rect, float radius)
+{
+  float d = radius * 2.0f;
+  if (d > rect.Width)
+    d = rect.Width;
+  if (d > rect.Height)
+    d = rect.Height;
+
+  path.Reset();
+  path.AddArc(rect.X, rect.Y, d, d, 180.0f, 90.0f);
+  path.AddArc(rect.X + rect.Width - d, rect.Y, d, d, 270.0f, 90.0f);
+  path.AddArc(rect.X + rect.Width - d, rect.Y + rect.Height - d, d, d, 0.0f, 90.0f);
+  path.AddArc(rect.X, rect.Y + rect.Height - d, d, d, 90.0f, 90.0f);
+  path.CloseFigure();
+}
+
+static void DrawStatusPill(
+    Gdiplus::Graphics &g,
+    const Gdiplus::RectF &rect,
+    const wchar_t *text,
+    bool active,
+    float s,
+    Gdiplus::Font &font)
+{
+  Gdiplus::GraphicsPath path;
+  AddRoundedRect(path, rect, rect.Height / 2.0f);
+
+  Gdiplus::Color bgClr = active ? Gdiplus::Color(255, 22, 45, 14) : Gdiplus::Color(255, 30, 33, 39);
+  Gdiplus::Color borderClr = active ? Gdiplus::Color(255, 45, 90, 20) : Gdiplus::Color(255, 46, 52, 62);
+  Gdiplus::Color textClr = active ? Gdiplus::Color(255, 118, 185, 0) : Gdiplus::Color(255, 138, 145, 158);
+  Gdiplus::SolidBrush bgBr(bgClr);
+  g.FillPath(&bgBr, &path);
+
+  Gdiplus::Pen pen(borderClr, 1.0f);
+  g.DrawPath(&pen, &path);
+
+  Gdiplus::StringFormat sf;
+  sf.SetAlignment(Gdiplus::StringAlignmentCenter);
+  sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+  Gdiplus::SolidBrush textBr(textClr);
+  g.DrawString(text, -1, &font, rect, &sf, &textBr);
+}
+
+static void DrawCustomButton(
+    Gdiplus::Graphics &g,
+    const Gdiplus::RectF &rect,
+    const wchar_t *text,
+    bool enabled,
+    bool hovered,
+    bool pressed,
+    bool isPrimary,
+    float s,
+    Gdiplus::Font &font)
+{
+  Gdiplus::GraphicsPath path;
+  AddRoundedRect(path, rect, 6.0f * s);
+
+  Gdiplus::Color bgClr, borderClr, textClr;
+  if (!enabled)
   {
-    g_hoverBtn = nullptr;
-    InvalidateRect(hwnd, nullptr, FALSE);
+    bgClr = Gdiplus::Color(255, 20, 22, 26);
+    borderClr = Gdiplus::Color(255, 34, 37, 44);
+    textClr = Gdiplus::Color(255, 80, 86, 98);
   }
-  return CallWindowProcW(orig, hwnd, msg, w, l);
+  else if (pressed)
+  {
+    bgClr = isPrimary ? Gdiplus::Color(255, 18, 38, 12) : Gdiplus::Color(255, 18, 20, 24);
+    borderClr = isPrimary ? Gdiplus::Color(255, 118, 185, 0) : Gdiplus::Color(255, 60, 66, 78);
+    textClr = Gdiplus::Color(255, 240, 242, 245);
+  }
+  else if (hovered)
+  {
+    bgClr = isPrimary ? Gdiplus::Color(255, 28, 58, 18) : Gdiplus::Color(255, 40, 45, 54);
+    borderClr = isPrimary ? Gdiplus::Color(255, 138, 210, 0) : Gdiplus::Color(255, 85, 95, 112);
+    textClr = Gdiplus::Color(255, 255, 255, 255);
+  }
+  else
+  {
+    bgClr = isPrimary ? Gdiplus::Color(255, 24, 46, 16) : Gdiplus::Color(255, 30, 34, 40);
+    borderClr = isPrimary ? Gdiplus::Color(255, 118, 185, 0) : Gdiplus::Color(255, 48, 54, 64);
+    textClr = isPrimary ? Gdiplus::Color(255, 240, 242, 245) : Gdiplus::Color(255, 215, 220, 228);
+  }
+
+  Gdiplus::SolidBrush br(bgClr);
+  g.FillPath(&br, &path);
+
+  Gdiplus::Pen pen(borderClr, 1.0f);
+  g.DrawPath(&pen, &path);
+
+  Gdiplus::SolidBrush textBr(textClr);
+  Gdiplus::StringFormat sf;
+  sf.SetAlignment(Gdiplus::StringAlignmentCenter);
+  sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+  g.DrawString(text, -1, &font, rect, &sf, &textBr);
+}
+
+static void DrawToast(
+    Gdiplus::Graphics &g,
+    const Gdiplus::RectF &rect,
+    const std::wstring &msg,
+    ToastType type,
+    float s,
+    Gdiplus::Font &font)
+{
+  Gdiplus::GraphicsPath path;
+  AddRoundedRect(path, rect, 8.0f * s);
+
+  Gdiplus::Color borderClr;
+  Gdiplus::Color accentClr;
+  const wchar_t *prefix = L"";
+
+  switch (type)
+  {
+  case ToastType::Success:
+    borderClr = Gdiplus::Color(255, 45, 90, 20);
+    accentClr = Gdiplus::Color(255, 118, 185, 0);
+    prefix = L"✓  ";
+    break;
+  case ToastType::Warning:
+    borderClr = Gdiplus::Color(255, 120, 80, 16);
+    accentClr = Gdiplus::Color(255, 245, 166, 35);
+    prefix = L"▲  ";
+    break;
+  case ToastType::Error:
+    borderClr = Gdiplus::Color(255, 120, 35, 45);
+    accentClr = Gdiplus::Color(255, 255, 85, 95);
+    prefix = L"✕  ";
+    break;
+  case ToastType::Info:
+    borderClr = Gdiplus::Color(255, 40, 70, 120);
+    accentClr = Gdiplus::Color(255, 100, 150, 255);
+    prefix = L"ℹ  ";
+    break;
+  case ToastType::None:
+  default:
+    borderClr = Gdiplus::Color(255, 42, 47, 56);
+    accentClr = Gdiplus::Color(255, 138, 145, 158);
+    prefix = L"";
+    break;
+  }
+
+  Gdiplus::SolidBrush bgBr(Gdiplus::Color(255, 23, 26, 31));
+  g.FillPath(&bgBr, &path);
+
+  Gdiplus::Pen pen(borderClr, 1.0f);
+  g.DrawPath(&pen, &path);
+
+  // Text (centered, no left vertical pill, no leading dot)
+  std::wstring display = std::wstring(prefix) + msg;
+  Gdiplus::RectF textRect(rect.X + 8.0f * s, rect.Y, rect.Width - 16.0f * s, rect.Height);
+  Gdiplus::SolidBrush textBr(accentClr);
+  Gdiplus::StringFormat sf;
+  sf.SetAlignment(Gdiplus::StringAlignmentCenter);
+  sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+  sf.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+  g.DrawString(display.c_str(), -1, &font, textRect, &sf, &textBr);
+}
+
+static void RenderUI(Gdiplus::Graphics &g, int width, int height)
+{
+  float s = g_dpi / 96.0f;
+
+  // Background
+  Gdiplus::SolidBrush bgBrush(Gdiplus::Color(255, 18, 20, 23));
+  g.FillRectangle(&bgBrush, 0, 0, width, height);
+
+  Gdiplus::FontFamily fontFam(L"Segoe UI");
+  Gdiplus::Font fontCardTitle(&fontFam, 13.0f * s, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+  Gdiplus::Font fontCardDesc(&fontFam, 11.0f * s, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+  Gdiplus::Font fontPill(&fontFam, 9.5f * s, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+  Gdiplus::Font fontBtn(&fontFam, 11.5f * s, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+  Gdiplus::Font fontToast(&fontFam, 11.5f * s, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+
+  Gdiplus::StringFormat sfNear;
+  sfNear.SetAlignment(Gdiplus::StringAlignmentNear);
+  sfNear.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+
+  // Card 1: Live Session Patch
+  float card1X = 18.0f * s;
+  float card1Y = 18.0f * s;
+  float cardW = static_cast<float>(width) - 36.0f * s;
+  float cardH = 100.0f * s;
+
+  Gdiplus::GraphicsPath card1Path;
+  Gdiplus::RectF card1Rect(card1X, card1Y, cardW, cardH);
+  AddRoundedRect(card1Path, card1Rect, 8.0f * s);
+
+  Gdiplus::SolidBrush cardBgBr(Gdiplus::Color(255, 26, 29, 34));
+  g.FillPath(&cardBgBr, &card1Path);
+  Gdiplus::Pen cardBorderPen(Gdiplus::Color(255, 42, 47, 56), 1.0f);
+  g.DrawPath(&cardBorderPen, &card1Path);
+
+  Gdiplus::RectF card1TitleRect(card1X + 16.0f * s, card1Y + 12.0f * s, 260.0f * s, 20.0f * s);
+  Gdiplus::SolidBrush cardTitleBr(Gdiplus::Color(255, 240, 242, 245));
+  g.DrawString(L"Live Session Patch", -1, &fontCardTitle, card1TitleRect, &sfNear, &cardTitleBr);
+
+  float pillW = 82.0f * s;
+  Gdiplus::RectF pill1Rect(card1X + cardW - pillW - 16.0f * s, card1Y + 11.0f * s, pillW, 20.0f * s);
+  DrawStatusPill(g, pill1Rect, g_stPatch ? L"ACTIVE" : L"INACTIVE", g_stPatch, s, fontPill);
+
+  Gdiplus::RectF card1DescRect(card1X + 16.0f * s, card1Y + 32.0f * s, cardW - 32.0f * s, 16.0f * s);
+  Gdiplus::SolidBrush cardDescBr(Gdiplus::Color(255, 138, 145, 158));
+  g.DrawString(L"Hooks nvcontainer in memory. Resets when PC reboots.", -1, &fontCardDesc, card1DescRect, &sfNear, &cardDescBr);
+
+  float btnW = (cardW - 44.0f * s) / 2.0f;
+  float btnH = 34.0f * s;
+  Gdiplus::RectF btn1Rect(card1X + 16.0f * s, card1Y + 54.0f * s, btnW, btnH);
+  Gdiplus::RectF btn2Rect(card1X + 28.0f * s + btnW, card1Y + 54.0f * s, btnW, btnH);
+
+  bool btn1En = IsButtonEnabled(BtnId::Apply);
+  bool btn1Hov = (g_hoverBtn == BtnId::Apply) && btn1En;
+  bool btn1Prs = (g_pressedBtn == BtnId::Apply) && btn1En;
+  DrawCustomButton(g, btn1Rect, g_stPatch ? L"✓ Patch Active" : L"Apply Patch",
+                   btn1En, btn1Hov, btn1Prs, !g_stPatch, s, fontBtn);
+
+  bool btn2En = IsButtonEnabled(BtnId::Eject);
+  bool btn2Hov = (g_hoverBtn == BtnId::Eject) && btn2En;
+  bool btn2Prs = (g_pressedBtn == BtnId::Eject) && btn2En;
+  DrawCustomButton(g, btn2Rect, L"Eject from Memory",
+                   btn2En, btn2Hov, btn2Prs, false, s, fontBtn);
+
+  // Card 2: Logon Startup Service
+  float card2X = 18.0f * s;
+  float card2Y = 128.0f * s;
+
+  Gdiplus::GraphicsPath card2Path;
+  Gdiplus::RectF card2Rect(card2X, card2Y, cardW, cardH);
+  AddRoundedRect(card2Path, card2Rect, 8.0f * s);
+  g.FillPath(&cardBgBr, &card2Path);
+  g.DrawPath(&cardBorderPen, &card2Path);
+
+  Gdiplus::RectF card2TitleRect(card2X + 16.0f * s, card2Y + 12.0f * s, 260.0f * s, 20.0f * s);
+  g.DrawString(L"Logon Startup Service", -1, &fontCardTitle, card2TitleRect, &sfNear, &cardTitleBr);
+
+  Gdiplus::RectF pill2Rect(card2X + cardW - pillW - 16.0f * s, card2Y + 11.0f * s, pillW, 20.0f * s);
+  DrawStatusPill(g, pill2Rect, g_stInstall ? L"INSTALLED" : L"DISABLED", g_stInstall, s, fontPill);
+
+  Gdiplus::RectF card2DescRect(card2X + 16.0f * s, card2Y + 32.0f * s, cardW - 32.0f * s, 16.0f * s);
+  g.DrawString(L"Silently applies patch at logon via Scheduled Task.", -1, &fontCardDesc, card2DescRect, &sfNear, &cardDescBr);
+
+  Gdiplus::RectF btn3Rect(card2X + 16.0f * s, card2Y + 54.0f * s, btnW, btnH);
+  Gdiplus::RectF btn4Rect(card2X + 28.0f * s + btnW, card2Y + 54.0f * s, btnW, btnH);
+
+  bool btn3En = IsButtonEnabled(BtnId::Install);
+  bool btn3Hov = (g_hoverBtn == BtnId::Install) && btn3En;
+  bool btn3Prs = (g_pressedBtn == BtnId::Install) && btn3En;
+  DrawCustomButton(g, btn3Rect, g_stInstall ? L"✓ Auto-Start Active" : L"Enable Auto-Start",
+                   btn3En, btn3Hov, btn3Prs, !g_stInstall, s, fontBtn);
+
+  bool btn4En = IsButtonEnabled(BtnId::Uninstall);
+  bool btn4Hov = (g_hoverBtn == BtnId::Uninstall) && btn4En;
+  bool btn4Prs = (g_pressedBtn == BtnId::Uninstall) && btn4En;
+  DrawCustomButton(g, btn4Rect, L"Remove Task",
+                   btn4En, btn4Hov, btn4Prs, false, s, fontBtn);
+
+  // Toast / Bottom Status
+  float toastX = 18.0f * s;
+  float toastY = 238.0f * s;
+  Gdiplus::RectF toastRect(toastX, toastY, cardW, 40.0f * s);
+  DrawToast(g, toastRect, g_toastMsg, g_toastType, s, fontToast);
 }
 
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
-  if (m == WM_COMMAND)
+  switch (m)
   {
-    int id = LOWORD(w);
-    switch (id)
-    {
-    case ID_BTN_ONCE:
-      ActionApplyNow();
-      RefreshStatus(h);
-      break;
-    case ID_BTN_REMOVE:
-      ActionRemove();
-      RefreshStatus(h);
-      break;
-    case ID_BTN_INSTALL:
-      ActionInstall();
-      RefreshStatus(h);
-      break;
-    case ID_BTN_UNINSTALL:
-      ActionUninstall();
-      RefreshStatus(h);
-      break;
-    }
-    return 0;
-  }
-  if (m == WM_DESTROY)
-  {
-    PostQuitMessage(0);
-    return 0;
-  }
-  if (m == WM_CLOSE)
-  {
-    DestroyWindow(h);
-    return 0;
-  }
-
-  if (m == WM_ERASEBKGND)
-  {
-    RECT rc;
-    GetClientRect(h, &rc);
-    HBRUSH br = CreateSolidBrush(kClrBg);
-    FillRect(reinterpret_cast<HDC>(w), &rc, br);
-    DeleteObject(br);
-    return 1;
-  }
-  if (m == WM_PAINT)
+  case WM_PAINT:
   {
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(h, &ps);
-    HPEN pen = CreatePen(PS_SOLID, 1, kClrBorder);
-    HPEN old = static_cast<HPEN>(SelectObject(hdc, pen));
-    MoveToEx(hdc, SC(kBtnX + 20), SC(64), nullptr);
-    LineTo(hdc, SC(kBtnX + kBtnW - 20), SC(64));
-    int mid = SC(kBtnY0) + 2 * (SC(kBtnH) + SC(kBtnGap)) + SC(5);
-    MoveToEx(hdc, SC(kBtnX + 20), mid, nullptr);
-    LineTo(hdc, SC(kBtnX + kBtnW - 20), mid);
-    SelectObject(hdc, old);
-    DeleteObject(pen);
+    RECT cr;
+    GetClientRect(h, &cr);
+    int width = cr.right - cr.left;
+    int height = cr.bottom - cr.top;
+
+    HDC memDC = CreateCompatibleDC(hdc);
+    HBITMAP memBmp = CreateCompatibleBitmap(hdc, width, height);
+    HGDIOBJ oldBmp = SelectObject(memDC, memBmp);
+
+    {
+      Gdiplus::Graphics g(memDC);
+      g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+      g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+      g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+      RenderUI(g, width, height);
+    }
+
+    BitBlt(hdc, 0, 0, width, height, memDC, 0, 0, SRCCOPY);
+    SelectObject(memDC, oldBmp);
+    DeleteObject(memBmp);
+    DeleteDC(memDC);
+
     EndPaint(h, &ps);
     return 0;
   }
-  if (m == WM_CTLCOLORSTATIC)
-  {
-    HDC hdc = reinterpret_cast<HDC>(w);
-    HWND ctrl = reinterpret_cast<HWND>(l);
-    SetBkMode(hdc, TRANSPARENT);
-    if (ctrl == g_lblStart)
-      SetTextColor(hdc, g_stInstall ? kClrGreen : kClrDim);
-    else if (ctrl == g_lblPatch)
-      SetTextColor(hdc, g_stPatch ? kClrGreen : kClrDim);
-    else
-      SetTextColor(hdc, kClrDim);
-    return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
-  }
-  if (m == WM_DRAWITEM)
-  {
-    auto *dis = reinterpret_cast<DRAWITEMSTRUCT *>(l);
-    if (dis->CtlType != ODT_BUTTON)
-      return DefWindowProcW(h, m, w, l);
-    bool hov = dis->hwndItem == g_hoverBtn;
-    bool prs = (dis->itemState & ODS_SELECTED) != 0;
-    HBRUSH br = CreateSolidBrush(prs ? kClrBtnPrs : hov ? kClrBtnHov
-                                                        : kClrBtnNorm);
-    FillRect(dis->hDC, &dis->rcItem, br);
-    DeleteObject(br);
-    RECT rc = dis->rcItem;
-    --rc.right;
-    --rc.bottom;
-    HPEN pen = CreatePen(PS_SOLID, 1, hov ? kClrAccent : kClrBorder);
-    HPEN oldP = static_cast<HPEN>(SelectObject(dis->hDC, pen));
-    MoveToEx(dis->hDC, rc.left, rc.top, nullptr);
-    LineTo(dis->hDC, rc.right, rc.top);
-    LineTo(dis->hDC, rc.right, rc.bottom);
-    LineTo(dis->hDC, rc.left, rc.bottom);
-    LineTo(dis->hDC, rc.left, rc.top);
-    SelectObject(dis->hDC, oldP);
-    DeleteObject(pen);
-    if (hov)
-    {
-      HPEN ap = CreatePen(PS_SOLID, 3, kClrAccent);
-      oldP = static_cast<HPEN>(SelectObject(dis->hDC, ap));
-      MoveToEx(dis->hDC, rc.left + 2, rc.top, nullptr);
-      LineTo(dis->hDC, rc.left + 2, rc.bottom + 1);
-      SelectObject(dis->hDC, oldP);
-      DeleteObject(ap);
-    }
-    // "Label|Description" format — bold top line, dim bottom line
-    wchar_t text[256];
-    GetWindowTextW(dis->hwndItem, text, 256);
-    SetBkMode(dis->hDC, TRANSPARENT);
-    wchar_t *sep = wcschr(text, L'|');
-    if (sep)
-    {
-      *sep = L'\0';
-      const wchar_t *desc = sep + 1;
-      int mid = (dis->rcItem.top + dis->rcItem.bottom) / 2;
-      RECT rTop = {dis->rcItem.left + SC(18), dis->rcItem.top, dis->rcItem.right - SC(8), mid};
-      RECT rBot = {dis->rcItem.left + SC(18), mid, dis->rcItem.right - SC(8), dis->rcItem.bottom};
-      if (g_uiFontBold)
-        SelectObject(dis->hDC, g_uiFontBold);
-      SetTextColor(dis->hDC, kClrText);
-      DrawTextW(dis->hDC, text, -1, &rTop, DT_LEFT | DT_BOTTOM | DT_SINGLELINE);
-      if (g_uiFont)
-        SelectObject(dis->hDC, g_uiFont);
-      SetTextColor(dis->hDC, kClrDim);
-      DrawTextW(dis->hDC, desc, -1, &rBot, DT_LEFT | DT_TOP | DT_SINGLELINE);
-    }
-    else
-    {
-      if (g_uiFont)
-        SelectObject(dis->hDC, g_uiFont);
-      SetTextColor(dis->hDC, kClrText);
-      RECT tr = dis->rcItem;
-      tr.left += SC(18);
-      DrawTextW(dis->hDC, text, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    }
-    if (dis->itemState & ODS_FOCUS)
-    {
-      RECT fr = dis->rcItem;
-      InflateRect(&fr, -3, -3);
-      DrawFocusRect(dis->hDC, &fr);
-    }
-    return TRUE;
-  }
-  return DefWindowProcW(h, m, w, l);
-}
 
-static void RegisterDlgClass()
-{
-  HICON hIcon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_APP_ICON));
-  WNDCLASSEXW wc = {sizeof(wc)};
-  wc.lpfnWndProc = WndProc;
-  wc.hInstance = GetModuleHandleW(nullptr);
-  wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(NULL_BRUSH));
-  wc.lpszClassName = L"IRDlg";
-  wc.hCursor = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
-  wc.hIcon = hIcon;
-  wc.hIconSm = hIcon;
-  RegisterClassExW(&wc);
+  case WM_ERASEBKGND:
+    return 1;
+
+  case WM_MOUSEMOVE:
+  {
+    float s = g_dpi / 96.0f;
+    RECT cr;
+    GetClientRect(h, &cr);
+    float width = static_cast<float>(cr.right - cr.left);
+
+    float x = static_cast<float>(LOWORD(l));
+    float y = static_cast<float>(HIWORD(l));
+    BtnId hit = HitTestButton(x, y, width, s);
+    if (!IsButtonEnabled(hit))
+      hit = BtnId::None;
+
+    if (hit != g_hoverBtn)
+    {
+      g_hoverBtn = hit;
+      InvalidateRect(h, nullptr, FALSE);
+    }
+
+    TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, h, 0};
+    TrackMouseEvent(&tme);
+    return 0;
+  }
+
+  case WM_MOUSELEAVE:
+    if (g_hoverBtn != BtnId::None || g_pressedBtn != BtnId::None)
+    {
+      g_hoverBtn = BtnId::None;
+      g_pressedBtn = BtnId::None;
+      InvalidateRect(h, nullptr, FALSE);
+    }
+    return 0;
+
+  case WM_SETCURSOR:
+    if (LOWORD(l) == HTCLIENT && g_hoverBtn != BtnId::None)
+    {
+      SetCursor(LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_HAND)));
+      return TRUE;
+    }
+    return DefWindowProcW(h, m, w, l);
+
+  case WM_LBUTTONDOWN:
+  {
+    float s = g_dpi / 96.0f;
+    RECT cr;
+    GetClientRect(h, &cr);
+    float width = static_cast<float>(cr.right - cr.left);
+
+    float x = static_cast<float>(LOWORD(l));
+    float y = static_cast<float>(HIWORD(l));
+    BtnId hit = HitTestButton(x, y, width, s);
+    if (IsButtonEnabled(hit))
+    {
+      g_pressedBtn = hit;
+      SetCapture(h);
+      InvalidateRect(h, nullptr, FALSE);
+    }
+    return 0;
+  }
+
+  case WM_LBUTTONUP:
+  {
+    if (GetCapture() == h)
+      ReleaseCapture();
+
+    if (g_pressedBtn != BtnId::None)
+    {
+      float s = g_dpi / 96.0f;
+      RECT cr;
+      GetClientRect(h, &cr);
+      float width = static_cast<float>(cr.right - cr.left);
+
+      float x = static_cast<float>(LOWORD(l));
+      float y = static_cast<float>(HIWORD(l));
+      BtnId hit = HitTestButton(x, y, width, s);
+
+      BtnId fired = (hit == g_pressedBtn) ? g_pressedBtn : BtnId::None;
+      g_pressedBtn = BtnId::None;
+      g_hoverBtn = IsButtonEnabled(hit) ? hit : BtnId::None;
+      InvalidateRect(h, nullptr, FALSE);
+
+      if (fired == BtnId::Apply)
+      {
+        ActionApplyNow();
+        RefreshStatus(h);
+      }
+      else if (fired == BtnId::Eject)
+      {
+        ActionRemove();
+        RefreshStatus(h);
+      }
+      else if (fired == BtnId::Install)
+      {
+        ActionInstall();
+        RefreshStatus(h);
+      }
+      else if (fired == BtnId::Uninstall)
+      {
+        ActionUninstall();
+        RefreshStatus(h);
+      }
+    }
+    return 0;
+  }
+
+  case WM_TIMER:
+    if (w == 1)
+    {
+      if (g_toastType != ToastType::None && (GetTickCount64() - g_toastTime > 5000))
+      {
+        g_toastType = ToastType::None;
+        g_toastMsg = L"Ready to patch";
+        InvalidateRect(h, nullptr, FALSE);
+      }
+      RefreshStatus(h);
+    }
+    return 0;
+
+  case WM_CLOSE:
+    DestroyWindow(h);
+    return 0;
+
+  case WM_DESTROY:
+    KillTimer(h, 1);
+    PostQuitMessage(0);
+    return 0;
+  }
+
+  return DefWindowProcW(h, m, w, l);
 }
 
 static void CenterWindow(HWND hwnd)
@@ -767,23 +1001,40 @@ static void CenterWindow(HWND hwnd)
 
 static void ShowDialog()
 {
-  g_stInstall = IsInstalled();
-  g_stPatch = IsPatchInMemory();
+  Gdiplus::GdiplusStartupInput gdiInput;
+  ULONG_PTR gdiToken = 0;
+  Gdiplus::GdiplusStartup(&gdiToken, &gdiInput, nullptr);
 
   HDC tmpDC = GetDC(nullptr);
   g_dpi = GetDeviceCaps(tmpDC, LOGPIXELSY);
   ReleaseDC(nullptr, tmpDC);
 
-  RegisterDlgClass();
+  HICON hAppIcon = static_cast<HICON>(LoadImageW(
+      GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_APP_ICON),
+      IMAGE_ICON, MulDiv(32, g_dpi, 96), MulDiv(32, g_dpi, 96), LR_SHARED));
 
-  constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
-  constexpr DWORD kExStyle = WS_EX_DLGMODALFRAME | WS_EX_TOPMOST;
-  RECT wr = {0, 0, SC(kDlgW), SC(kDlgH)};
+  WNDCLASSEXW wc = {sizeof(wc)};
+  wc.style = CS_HREDRAW | CS_VREDRAW;
+  wc.lpfnWndProc = WndProc;
+  wc.hInstance = GetModuleHandleW(nullptr);
+  wc.hbrBackground = nullptr;
+  wc.lpszClassName = L"IRPatcherWindow";
+  wc.hCursor = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
+  wc.hIcon = hAppIcon;
+  wc.hIconSm = hAppIcon;
+  RegisterClassExW(&wc);
+
+  constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+  constexpr DWORD kExStyle = WS_EX_APPWINDOW;
+
+  int scaledW = MulDiv(kDlgW, g_dpi, 96);
+  int scaledH = MulDiv(kDlgH, g_dpi, 96);
+  RECT wr = {0, 0, scaledW, scaledH};
   AdjustWindowRectEx(&wr, kStyle, FALSE, kExStyle);
 
   HWND hwnd = CreateWindowExW(
       kExStyle,
-      L"IRDlg", L"Instant Replay Patcher",
+      L"IRPatcherWindow", L"Instant Replay Patcher",
       kStyle,
       CW_USEDEFAULT, CW_USEDEFAULT, wr.right - wr.left, wr.bottom - wr.top,
       nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
@@ -792,46 +1043,8 @@ static void ShowDialog()
   DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
   g_hwnd = hwnd;
 
-  g_uiFont = CreateFontW(
-      -MulDiv(10, g_dpi, 96),
-      0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-      CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, nullptr);
-  g_uiFontBold = CreateFontW(
-      -MulDiv(12, g_dpi, 96),
-      0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-      CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, nullptr);
-
-  wchar_t s1[64], s2[64];
-  swprintf_s(s1, L"Startup:  %ls", g_stInstall ? L"Installed" : L"Not installed");
-  swprintf_s(s2, L"Patch:  %ls", g_stPatch ? L"Active" : L"Inactive");
-  g_lblStart = CreateWindowExW(0, L"STATIC", s1, WS_CHILD | WS_VISIBLE | SS_LEFT,
-                               SC(kBtnX), SC(21), SC(kBtnW / 2 - 10), SC(22),
-                               hwnd, nullptr, nullptr, nullptr);
-  g_lblPatch = CreateWindowExW(0, L"STATIC", s2, WS_CHILD | WS_VISIBLE | SS_LEFT,
-                               SC(kBtnX + kBtnW / 2 + 10), SC(21), SC(kBtnW / 2 - 10), SC(22),
-                               hwnd, nullptr, nullptr, nullptr);
-  SendMessageW(g_lblStart, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFontBold), TRUE);
-  SendMessageW(g_lblPatch, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFontBold), TRUE);
-
-  int BY = SC(kBtnY0);
-  auto Btn = [&](int id, const wchar_t *text)
-  {
-    HWND b = CreateWindowExW(0, L"BUTTON", text,
-                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-                             SC(kBtnX), BY, SC(kBtnW), SC(kBtnH), hwnd,
-                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), nullptr, nullptr);
-    SetWindowLongPtrW(b, GWLP_USERDATA, GetWindowLongPtrW(b, GWLP_WNDPROC));
-    SetWindowLongPtrW(b, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(BtnSubclassProc));
-    BY += SC(kBtnH) + SC(kBtnGap);
-  };
-
-  Btn(ID_BTN_ONCE, L"Apply Now|Patches this session only - resets on reboot");
-  Btn(ID_BTN_REMOVE, L"Remove|Ejects patch from memory, startup entry unchanged");
-  BY += SC(18);
-  Btn(ID_BTN_INSTALL, L"Install|Patches now and auto-applies on every login");
-  Btn(ID_BTN_UNINSTALL, L"Uninstall|Removes patch from memory and clears startup entry");
+  RefreshStatus(hwnd);
+  SetTimer(hwnd, 1, 1500, nullptr);
 
   CenterWindow(hwnd);
   ShowWindow(hwnd, SW_SHOW);
@@ -844,18 +1057,10 @@ static void ShowDialog()
     DispatchMessageW(&msg);
   }
 
-  if (g_uiFont)
-  {
-    DeleteObject(g_uiFont);
-    g_uiFont = nullptr;
-  }
-  if (g_uiFontBold)
-  {
-    DeleteObject(g_uiFontBold);
-    g_uiFontBold = nullptr;
-  }
-  g_hwnd = g_lblStart = g_lblPatch = nullptr;
+  g_hwnd = nullptr;
+  Gdiplus::GdiplusShutdown(gdiToken);
 }
+
 /* -----------------------------------------------------------------------
  * wWinMain
  * --------------------------------------------------------------------- */
@@ -867,9 +1072,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR lpCmd, int)
   HANDLE hMutex = CreateMutexW(nullptr, TRUE, L"IRPatcher_Instance");
   if (GetLastError() == ERROR_ALREADY_EXISTS)
   {
-    HWND existing = FindWindowW(L"IRDlg", nullptr);
-    if (existing) {
-      if (IsIconic(existing)) ShowWindow(existing, SW_RESTORE);
+    HWND existing = FindWindowW(L"IRPatcherWindow", nullptr);
+    if (existing)
+    {
+      if (IsIconic(existing))
+        ShowWindow(existing, SW_RESTORE);
       SetForegroundWindow(existing);
     }
     CloseHandle(hMutex);
@@ -878,7 +1085,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR lpCmd, int)
 
   if (!IsRunningAsAdmin())
   {
-    MessageBoxW(g_hwnd,
+    MessageBoxW(nullptr,
                 L"This application requires administrator privileges.\n"
                 L"Right-click IRPatcher.exe and select \"Run as administrator\".",
                 L"Administrator Required", MB_OK | MB_ICONERROR);

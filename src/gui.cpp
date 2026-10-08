@@ -1,15 +1,24 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <wininet.h>
+#include <shellapi.h>
 #include <dwmapi.h>
 #include <objbase.h>
 #include <gdiplus.h>
 #include <string>
+#include <thread>
 #include "gui.h"
 #include "patcher.h"
+#include "version.h"
 
 static constexpr int kDlgW = 360;
-static constexpr int kDlgH = 296;
+static constexpr int kDlgH = 314;
+
+static const wchar_t *kCurrentVersion = IRP_VERSION_TAG_W;
+static const wchar_t *kRepoUrl = IRP_REPO_URL;
+static const wchar_t *kReleasesUrl = IRP_RELEASES_URL;
+static const wchar_t *kApiUrl = IRP_API_URL;
 
 enum class BtnId
 {
@@ -17,7 +26,9 @@ enum class BtnId
   Apply,
   Eject,
   Install,
-  Uninstall
+  Uninstall,
+  UpdateBanner,
+  StarFooter
 };
 
 enum class ToastType
@@ -40,6 +51,99 @@ static int g_dpi = 96;
 static std::wstring g_toastMsg = L"Ready";
 static ToastType g_toastType = ToastType::None;
 static ULONGLONG g_toastTime = 0;
+
+static bool g_updateAvailable = false;
+static std::wstring g_latestTag = L"";
+static std::wstring g_releaseUrl = L"";
+
+/* -----------------------------------------------------------------------
+ * Version parsing & update checking
+ * --------------------------------------------------------------------- */
+static bool ParseVersion(const std::wstring &v, int &major, int &minor, int &patch)
+{
+  major = minor = patch = 0;
+  size_t i = 0;
+  while (i < v.size() && (v[i] == L'v' || v[i] == L'V' || !iswdigit(v[i])))
+    i++;
+  if (i >= v.size())
+    return false;
+  return swscanf_s(v.c_str() + i, L"%d.%d.%d", &major, &minor, &patch) >= 1;
+}
+
+static bool IsNewerVersion(const std::wstring &currentVer, const std::wstring &latestVer)
+{
+  int cMaj = 0, cMin = 0, cPat = 0;
+  int lMaj = 0, lMin = 0, lPat = 0;
+  if (!ParseVersion(currentVer, cMaj, cMin, cPat))
+    return false;
+  if (!ParseVersion(latestVer, lMaj, lMin, lPat))
+    return false;
+
+  if (lMaj != cMaj)
+    return lMaj > cMaj;
+  if (lMin != cMin)
+    return lMin > cMin;
+  return lPat > cPat;
+}
+
+static std::wstring ExtractJsonField(const std::string &json, const std::string &key)
+{
+  std::string pattern = "\"" + key + "\":\"";
+  size_t pos = json.find(pattern);
+  if (pos == std::string::npos)
+  {
+    pattern = "\"" + key + "\": \"";
+    pos = json.find(pattern);
+    if (pos == std::string::npos)
+      return L"";
+  }
+  pos += pattern.length();
+  size_t endPos = json.find('"', pos);
+  if (endPos == std::string::npos)
+    return L"";
+  std::string val = json.substr(pos, endPos - pos);
+  return std::wstring(val.begin(), val.end());
+}
+
+static void CheckForUpdatesAsync()
+{
+  std::thread([]() {
+    std::wstring userAgent = std::wstring(L"InstantReplayPatcher/") + IRP_VERSION_STR_W;
+    HINTERNET hNet = InternetOpenW(userAgent.c_str(), INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
+    if (!hNet)
+      return;
+
+    DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_SECURE | INTERNET_FLAG_NO_CACHE_WRITE;
+    HINTERNET hUrl = InternetOpenUrlW(hNet, kApiUrl, nullptr, 0, flags, 0);
+    if (!hUrl)
+    {
+      InternetCloseHandle(hNet);
+      return;
+    }
+
+    std::string resp;
+    char buf[4096];
+    DWORD readBytes = 0;
+    while (InternetReadFile(hUrl, buf, sizeof(buf), &readBytes) && readBytes > 0)
+    {
+      resp.append(buf, readBytes);
+    }
+    InternetCloseHandle(hUrl);
+    InternetCloseHandle(hNet);
+
+    std::wstring tag = ExtractJsonField(resp, "tag_name");
+    std::wstring url = ExtractJsonField(resp, "html_url");
+
+    if (!tag.empty() && IsNewerVersion(kCurrentVersion, tag))
+    {
+      g_updateAvailable = true;
+      g_latestTag = tag;
+      g_releaseUrl = url.empty() ? kReleasesUrl : url;
+      if (g_hwnd)
+        PostMessageW(g_hwnd, WM_APP + 1, 0, 0);
+    }
+  }).detach();
+}
 
 static void SetToast(const std::wstring &msg, ToastType type)
 {
@@ -147,6 +251,10 @@ static bool IsButtonEnabled(BtnId id)
     return !g_stInstall;
   case BtnId::Uninstall:
     return g_stInstall;
+  case BtnId::UpdateBanner:
+    return g_updateAvailable && (g_toastType == ToastType::None);
+  case BtnId::StarFooter:
+    return true;
   default:
     return false;
   }
@@ -175,6 +283,20 @@ static BtnId HitTestButton(float x, float y, float width, float s)
     return BtnId::Install;
   if (btnUninstall.Contains(x, y))
     return BtnId::Uninstall;
+
+  float toastX = 16.0f * s;
+  float toastY = 240.0f * s;
+  float toastH = 34.0f * s;
+  Gdiplus::RectF toastRect(toastX, toastY, cardW, toastH);
+  if (g_updateAvailable && (g_toastType == ToastType::None) && toastRect.Contains(x, y))
+    return BtnId::UpdateBanner;
+
+  float footerX = 16.0f * s;
+  float footerY = 282.0f * s;
+  float footerH = 18.0f * s;
+  Gdiplus::RectF footerRect(footerX, footerY, cardW, footerH);
+  if (footerRect.Contains(x, y))
+    return BtnId::StarFooter;
 
   return BtnId::None;
 }
@@ -328,6 +450,56 @@ static void DrawToast(
   g.DrawString(msg.c_str(), -1, &font, textRect, &sf, &textBr);
 }
 
+static void DrawUpdateBanner(
+    Gdiplus::Graphics &g,
+    const Gdiplus::RectF &rect,
+    const std::wstring &latestTag,
+    bool hovered,
+    bool pressed,
+    float s,
+    Gdiplus::Font &font)
+{
+  Gdiplus::GraphicsPath path;
+  AddRoundedRect(path, rect, 6.0f * s);
+
+  Gdiplus::Color bgClr = pressed ? Gdiplus::Color(255, 28, 22, 10) :
+                         hovered ? Gdiplus::Color(255, 42, 32, 14) :
+                                   Gdiplus::Color(255, 34, 26, 12);
+  Gdiplus::Color borderClr = hovered ? Gdiplus::Color(255, 180, 140, 35) :
+                                       Gdiplus::Color(255, 110, 85, 20);
+  Gdiplus::Color textClr = Gdiplus::Color(255, 251, 191, 36);
+
+  Gdiplus::SolidBrush bgBr(bgClr);
+  g.FillPath(&bgBr, &path);
+
+  Gdiplus::Pen pen(borderClr, 1.0f);
+  g.DrawPath(&pen, &path);
+
+  std::wstring text = L"\x26A1 Update available: " + latestTag + L" \x2014 Click to download";
+  Gdiplus::SolidBrush textBr(textClr);
+  Gdiplus::StringFormat sf;
+  sf.SetAlignment(Gdiplus::StringAlignmentCenter);
+  sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+  g.DrawString(text.c_str(), -1, &font, rect, &sf, &textBr);
+}
+
+static void DrawStarFooter(
+    Gdiplus::Graphics &g,
+    const Gdiplus::RectF &rect,
+    bool hovered,
+    Gdiplus::Font &font)
+{
+  Gdiplus::Color textClr = hovered ? Gdiplus::Color(255, 175, 195, 220) :
+                                     Gdiplus::Color(255, 95, 108, 122);
+  Gdiplus::SolidBrush textBr(textClr);
+  Gdiplus::StringFormat sf;
+  sf.SetAlignment(Gdiplus::StringAlignmentCenter);
+  sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+
+  const wchar_t *text = L"Enjoying the app? Star on GitHub & share with friends \x2605";
+  g.DrawString(text, -1, &font, rect, &sf, &textBr);
+}
+
 static void RenderDashboard(Gdiplus::Graphics &g, int width, int height, float s)
 {
   Gdiplus::SolidBrush bgBrush(Gdiplus::Color(255, 18, 20, 23));
@@ -375,17 +547,19 @@ static void RenderDashboard(Gdiplus::Graphics &g, int width, int height, float s
   // Pills:       10.5px Bold   (Explorer badges / tag pills)
   // Buttons:     13.5px Semib  (Explorer / WinUI standard action buttons)
   // Toast:       12.5px Regular(Explorer status / info text)
+  // Footer:      10.5px Regular(Fluent Caption metadata)
   Gdiplus::Font fontCardTitle(pSemiFam, 15.0f * s, semiStyle, Gdiplus::UnitPixel);
   Gdiplus::Font fontCardDesc(pFam, 12.0f * s, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
   Gdiplus::Font fontPill(pFamSmall, 10.5f * s, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
   Gdiplus::Font fontBtn(pSemiFam, 13.5f * s, semiStyle, Gdiplus::UnitPixel);
   Gdiplus::Font fontToast(pFam, 12.5f * s, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+  Gdiplus::Font fontFooter(pFamSmall, 10.5f * s, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
 
   Gdiplus::StringFormat sfNear;
   sfNear.SetAlignment(Gdiplus::StringAlignmentNear);
   sfNear.SetLineAlignment(Gdiplus::StringAlignmentCenter);
 
-  // Card 1
+  // Card 1: Current Session
   float card1X = 16.0f * s;
   float card1Y = 15.0f * s;
   float cardW = static_cast<float>(width) - 32.0f * s;
@@ -464,12 +638,34 @@ static void RenderDashboard(Gdiplus::Graphics &g, int width, int height, float s
   DrawCustomButton(g, btn4Rect, L"Disable",
                    btn4En, btn4Hov, btn4Prs, false, s, fontBtn);
 
-  // Toast / Bottom Status
+  // 1. Toast / Update Banner slot
   float toastX = 16.0f * s;
   float toastY = 240.0f * s;
-  float toastH = 36.0f * s;
+  float toastH = 34.0f * s;
   Gdiplus::RectF toastRect(toastX, toastY, cardW, toastH);
-  DrawToast(g, toastRect, g_toastMsg, g_toastType, s, fontToast);
+
+  if (g_toastType != ToastType::None)
+  {
+    DrawToast(g, toastRect, g_toastMsg, g_toastType, s, fontToast);
+  }
+  else if (g_updateAvailable)
+  {
+    bool hov = (g_hoverBtn == BtnId::UpdateBanner);
+    bool prs = (g_pressedBtn == BtnId::UpdateBanner);
+    DrawUpdateBanner(g, toastRect, g_latestTag, hov, prs, s, fontToast);
+  }
+  else
+  {
+    DrawToast(g, toastRect, g_toastMsg, ToastType::None, s, fontToast);
+  }
+
+  // 2. Star & Share Footer
+  float footerX = 16.0f * s;
+  float footerY = 282.0f * s;
+  float footerH = 18.0f * s;
+  Gdiplus::RectF footerRect(footerX, footerY, cardW, footerH);
+  bool starHov = (g_hoverBtn == BtnId::StarFooter);
+  DrawStarFooter(g, footerRect, starHov, fontFooter);
 }
 
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
@@ -507,6 +703,14 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
 
   case WM_ERASEBKGND:
     return 1;
+
+  case WM_SETCURSOR:
+    if (g_hoverBtn != BtnId::None)
+    {
+      SetCursor(LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_HAND)));
+      return TRUE;
+    }
+    break;
 
   case WM_MOUSEMOVE:
   {
@@ -601,9 +805,23 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
         ActionUninstall();
         RefreshStatus(h);
       }
+      else if (fired == BtnId::UpdateBanner)
+      {
+        ShellExecuteW(nullptr, L"open",
+                      g_releaseUrl.empty() ? kReleasesUrl : g_releaseUrl.c_str(),
+                      nullptr, nullptr, SW_SHOWNORMAL);
+      }
+      else if (fired == BtnId::StarFooter)
+      {
+        ShellExecuteW(nullptr, L"open", kRepoUrl, nullptr, nullptr, SW_SHOWNORMAL);
+      }
     }
     return 0;
   }
+
+  case WM_APP + 1:
+    InvalidateRect(h, nullptr, FALSE);
+    return 0;
 
   case WM_TIMER:
     if (w == 1)
@@ -688,6 +906,8 @@ void ShowDialog()
   RefreshStatus(hwnd);
   SetTimer(hwnd, 1, 1500, nullptr);
 
+  CheckForUpdatesAsync();
+
   CenterWindow(hwnd);
   ShowWindow(hwnd, SW_SHOW);
   UpdateWindow(hwnd);
@@ -702,4 +922,3 @@ void ShowDialog()
   g_hwnd = nullptr;
   Gdiplus::GdiplusShutdown(gdiToken);
 }
-

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(InstantReplayPatcher LANGUAGES C CXX RC)
+project(InstantReplayPatcher VERSION 1.2.0 LANGUAGES C CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -97,6 +97,7 @@ target_link_libraries(IRPatcher PRIVATE
     gdiplus
     shell32
     dwmapi
+    wininet
 )
 
 # Copy final artifacts to bin/ in project root for distribution

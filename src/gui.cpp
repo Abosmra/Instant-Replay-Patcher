@@ -199,10 +199,8 @@ static void DrawStatusPill(
     const Gdiplus::RectF &rect,
     const wchar_t *text,
     bool active,
-    float s,
     Gdiplus::Font &font)
 {
-  (void)s;
   Gdiplus::GraphicsPath path;
   AddRoundedRect(path, rect, rect.Height / 2.0f);
 
@@ -332,7 +330,6 @@ static void DrawToast(
 
 static void RenderDashboard(Gdiplus::Graphics &g, int width, int height, float s)
 {
-  (void)height;
   Gdiplus::SolidBrush bgBrush(Gdiplus::Color(255, 18, 20, 23));
   g.FillRectangle(&bgBrush, 0, 0, width, height);
 
@@ -410,7 +407,7 @@ static void RenderDashboard(Gdiplus::Graphics &g, int width, int height, float s
   float pillW = 82.0f * s;
   float pillH = 20.0f * s;
   Gdiplus::RectF pill1Rect(card1X + cardW - pillW - 16.0f * s, card1Y + 12.0f * s, pillW, pillH);
-  DrawStatusPill(g, pill1Rect, g_stPatch ? L"ACTIVE" : L"INACTIVE", g_stPatch, s, fontPill);
+  DrawStatusPill(g, pill1Rect, g_stPatch ? L"ACTIVE" : L"INACTIVE", g_stPatch, fontPill);
 
   Gdiplus::RectF card1DescRect(card1X + 16.0f * s, card1Y + 36.0f * s, cardW - 32.0f * s, 16.0f * s);
   Gdiplus::SolidBrush cardDescBr(Gdiplus::Color(255, 138, 145, 158));
@@ -447,7 +444,7 @@ static void RenderDashboard(Gdiplus::Graphics &g, int width, int height, float s
   g.DrawString(L"Start with Windows", -1, &fontCardTitle, card2TitleRect, &sfNear, &cardTitleBr);
 
   Gdiplus::RectF pill2Rect(card2X + cardW - pillW - 16.0f * s, card2Y + 12.0f * s, pillW, pillH);
-  DrawStatusPill(g, pill2Rect, g_stInstall ? L"ENABLED" : L"DISABLED", g_stInstall, s, fontPill);
+  DrawStatusPill(g, pill2Rect, g_stInstall ? L"ENABLED" : L"DISABLED", g_stInstall, fontPill);
 
   Gdiplus::RectF card2DescRect(card2X + 16.0f * s, card2Y + 36.0f * s, cardW - 32.0f * s, 16.0f * s);
   g.DrawString(L"Fixes Instant Replay automatically on startup.", -1, &fontCardDesc, card2DescRect, &sfNear, &cardDescBr);

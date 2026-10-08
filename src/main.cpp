@@ -113,7 +113,15 @@ std::wstring ExtractDll()
   HANDLE hf = CreateFileW(path, GENERIC_WRITE, 0, nullptr,
                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (hf == INVALID_HANDLE_VALUE)
-    return L"";
+  {
+    // If standard path is locked, fallback to PID-specific unique name
+    swprintf_s(path, L"%sir_hook_%lu.dll", tmp, GetCurrentProcessId());
+    hf = CreateFileW(path, GENERIC_WRITE, 0, nullptr,
+                     CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE)
+      return L"";
+  }
+
   DWORD written = 0;
   WriteFile(hf, data, size, &written, nullptr);
   CloseHandle(hf);
@@ -177,6 +185,28 @@ static std::wstring GetProcCmdLine(DWORD pid)
   return result;
 }
 
+static bool ProcessHasModule(DWORD pid, const wchar_t *modName)
+{
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+  if (snap == INVALID_HANDLE_VALUE)
+    return false;
+  MODULEENTRY32W me = {sizeof(me)};
+  bool found = false;
+  if (Module32FirstW(snap, &me))
+  {
+    do
+    {
+      if (_wcsicmp(me.szModule, modName) == 0)
+      {
+        found = true;
+        break;
+      }
+    } while (Module32NextW(snap, &me));
+  }
+  CloseHandle(snap);
+  return found;
+}
+
 bool AnyNvContainerRunning()
 {
   HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -204,24 +234,38 @@ DWORD FindNvContainer()
   HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
   if (snap == INVALID_HANDLE_VALUE)
     return 0;
+
   PROCESSENTRY32W pe = {sizeof(pe)};
-  DWORD pid = 0;
+  DWORD fallbackPid = 0;
+  DWORD matchedPid = 0;
+
   if (Process32FirstW(snap, &pe))
   {
     do
     {
       if (_wcsicmp(pe.szExeFile, L"nvcontainer.exe") == 0)
       {
-        if (GetProcCmdLine(pe.th32ProcessID).find(L"SPUser") != std::wstring::npos)
+        // 1. Primary check: check command line for SPUser
+        std::wstring cmd = GetProcCmdLine(pe.th32ProcessID);
+        if (!cmd.empty() && cmd.find(L"SPUser") != std::wstring::npos)
         {
-          pid = pe.th32ProcessID;
+          matchedPid = pe.th32ProcessID;
           break;
+        }
+
+        // 2. Secondary check: check if it has ShadowPlay modules loaded
+        if (ProcessHasModule(pe.th32ProcessID, L"_nvspcaps64.dll") ||
+            ProcessHasModule(pe.th32ProcessID, L"capcore64.dll") ||
+            ProcessHasModule(pe.th32ProcessID, L"nvfp64.dll"))
+        {
+          fallbackPid = pe.th32ProcessID;
         }
       }
     } while (Process32NextW(snap, &pe));
   }
   CloseHandle(snap);
-  return pid;
+
+  return matchedPid ? matchedPid : fallbackPid;
 }
 
 static DWORD WaitForNvContainer()
@@ -250,7 +294,8 @@ bool IsPatchInMemory()
   {
     do
     {
-      if (_wcsnicmp(me.szModule, L"ir_hook", 7) == 0)
+      if (_wcsnicmp(me.szModule, L"ir_hook", 7) == 0 ||
+          _wcsicmp(me.szModule, L"hook.dll") == 0)
       {
         found = true;
         break;
@@ -272,6 +317,7 @@ bool DoInject(DWORD pid, const wchar_t *dll)
       FALSE, pid);
   if (!hp)
     return false;
+
   size_t bytes = (wcslen(dll) + 1) * sizeof(wchar_t);
   void *remote = VirtualAllocEx(hp, nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
   if (!remote)
@@ -279,14 +325,23 @@ bool DoInject(DWORD pid, const wchar_t *dll)
     CloseHandle(hp);
     return false;
   }
+
   if (!WriteProcessMemory(hp, remote, dll, bytes, nullptr))
   {
     VirtualFreeEx(hp, remote, 0, MEM_RELEASE);
     CloseHandle(hp);
     return false;
   }
+
   auto fn = reinterpret_cast<LPTHREAD_START_ROUTINE>(
       GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW"));
+  if (!fn)
+  {
+    VirtualFreeEx(hp, remote, 0, MEM_RELEASE);
+    CloseHandle(hp);
+    return false;
+  }
+
   HANDLE ht = CreateRemoteThread(hp, nullptr, 0, fn, remote, 0, nullptr);
   if (!ht)
   {
@@ -294,13 +349,18 @@ bool DoInject(DWORD pid, const wchar_t *dll)
     CloseHandle(hp);
     return false;
   }
-  WaitForSingleObject(ht, kInjectTimeoutMs);
+
+  DWORD waitRes = WaitForSingleObject(ht, kInjectTimeoutMs);
   DWORD code = 0;
   GetExitCodeThread(ht, &code);
   CloseHandle(ht);
   VirtualFreeEx(hp, remote, 0, MEM_RELEASE);
   CloseHandle(hp);
-  return code != 0;
+
+  if (waitRes != WAIT_OBJECT_0 || code == 0)
+    return false;
+
+  return IsPatchInMemory();
 }
 
 bool DoEject(DWORD pid)
@@ -315,7 +375,8 @@ bool DoEject(DWORD pid)
   {
     do
     {
-      if (_wcsnicmp(me.szModule, L"ir_hook", 7) == 0)
+      if (_wcsnicmp(me.szModule, L"ir_hook", 7) == 0 ||
+          _wcsicmp(me.szModule, L"hook.dll") == 0)
       {
         hMod = me.hModule;
         wcsncpy_s(loadedDllPath, me.szExePath, _TRUNCATE);
@@ -326,30 +387,46 @@ bool DoEject(DWORD pid)
   CloseHandle(snap);
   if (!hMod)
     return false;
+
   HANDLE hp = OpenProcess(
       PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION,
       FALSE, pid);
   if (!hp)
     return false;
+
   auto fn = reinterpret_cast<LPTHREAD_START_ROUTINE>(
       GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "FreeLibrary"));
+  if (!fn)
+  {
+    CloseHandle(hp);
+    return false;
+  }
+
   HANDLE ht = CreateRemoteThread(hp, nullptr, 0, fn, hMod, 0, nullptr);
   if (!ht)
   {
     CloseHandle(hp);
     return false;
   }
+
   WaitForSingleObject(ht, kInjectTimeoutMs);
   DWORD code = 0;
   GetExitCodeThread(ht, &code);
   CloseHandle(ht);
   CloseHandle(hp);
+
+  for (int attempt = 0; attempt < 10; ++attempt)
+  {
+    if (!IsPatchInMemory())
+      break;
+    Sleep(50);
+  }
+
   if (loadedDllPath[0])
   {
-    Sleep(100);
     DeleteFileW(loadedDllPath);
   }
-  return code != 0;
+  return code != 0 && !IsPatchInMemory();
 }
 
 static void EnableDebugPriv()
